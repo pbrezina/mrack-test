@@ -1,0 +1,324 @@
+config:
+  outputs:
+  - ansible-inventory
+  - pytest-mh
+  ansible:
+    layout:
+      all:
+        vars:
+          ansible_become: yes
+        children:
+          base:
+            children:
+              base_client: {}
+              base_ipa: {}
+              base_ldap: {}
+              base_samba: {}
+              base_nfs: {}
+              base_kdc: {}
+              base_ground: {}
+          services:
+            children:
+              client: {}
+              ipa: {}
+              ldap: {}
+              samba: {}
+              nfs: {}
+              kdc: {}
+domains:
+  - name: sssd
+    hosts:
+      - name: dns.test
+        group: medium
+        os: fedora-37
+
+      - name: client.test
+        group: medium
+        groups:
+        - base_ground
+        - base_client
+        - client
+        role: client
+        os: fedora-37
+        pytest_mh:
+          artifacts:
+          - /etc/sssd/*
+          - /var/log/sssd/*
+          - /var/lib/sss/db/*
+
+      - name: master.ipa.test
+        group: ipa
+        groups:
+        - base_ground
+        - base_ldap
+        - base_ipa
+        - ipa
+        role: ipa
+        os: fedora-37
+        pytest_mh:
+          config:
+            client:
+              ipa_domain: ipa.test
+              krb5_keytab: /enrollment/ipa.keytab
+              ldap_krb5_keytab: /enrollment/ipa.keytab
+
+      - name: master.ldap.test
+        group: medium
+        groups:
+        - base_ground
+        - base_ldap
+        - ldap
+        role: ldap
+        os: fedora-37
+        pytest_mh:
+          config:
+            binddn: cn=Directory Manager
+            bindpw: Secret123
+            client:
+              ldap_tls_reqcert: demand
+              ldap_tls_cacert: /data/certs/ca.crt
+              dns_discovery_domain: ldap.test
+
+      - name: dc.samba.test
+        group: medium
+        groups:
+        - base_ground
+        - base_samba
+        - samba
+        role: samba
+        os: fedora-37
+        pytest_mh:
+          config:
+            binddn: CN=Administrator,CN=Users,DC=samba,DC=test
+            bindpw: Secret123
+            client:
+              ad_domain: samba.test
+              krb5_keytab: /enrollment/samba.keytab
+              ldap_krb5_keytab: /enrollment/samba.keytab
+
+      - name: kdc.test
+        group: medium
+        groups:
+        - base_ground
+        - base_kdc
+        - kdc
+        role: kdc
+        os: fedora-37
+        pytest_mh:
+          config:
+            realm: TEST
+            domain: test
+            client:
+              krb5_server: kdc.test
+              krb5_kpasswd: kdc.test
+              krb5_realm: TEST
+
+      - name: nfs.test
+        group: medium
+        groups:
+        - base_ground
+        - base_nfs
+        - nfs
+        role: nfs
+        os: fedora-37
+        pytest_mh:
+          config:
+            exports_dir: /dev/shm/exports
+phases:
+  - name: init
+    steps:
+    - playbook: init/testrunner-dir.yaml
+    # Initialize SSSD test suite (move to standalone playbook)
+    - playbook: |
+        - hosts: localhost
+          tasks:
+          - name: Clone SSSD
+            git:
+              repo: "https://github.com/pbrezina/sssd.git"
+              dest: "{{ twd }}/repo/sssd"
+              version: "tls"
+              single_branch: yes
+              depth: 1
+              force: yes
+
+          - name: Clone sssd-ci-containers
+            git:
+              repo: "https://github.com/SSSD/sssd-ci-containers.git"
+              dest: "{{ twd }}/repo/sssd-ci-containers"
+              version: "master"
+              single_branch: yes
+              depth: 1
+              force: yes
+
+          - name: Install requirements for pytest-mh tests
+            pip:
+              chdir: "{{ twd }}/repo/sssd/src/tests/system"
+              requirements: requirements.txt
+              virtualenv: .venv
+
+  - name: provision
+    steps:
+    - playbook: provision/mrack-up.yaml
+    - playbook: provision/wait.yaml
+
+  - name: prep
+    steps:
+    - playbook: prep/redhat-base.yaml
+    - playbook: prep/repos.yaml
+      extra_vars:
+        repos_buildroot: yes
+        repos_buildroot_debug: yes
+    - playbook: prep/enable-passwd-ssh.yaml
+    - playbook: prep/root-ssh.yaml
+    # Setup DNS (move to standalone playbook)
+    - playbook: |
+        - hosts: all
+          become: True
+          tasks:
+          - name: Gather the package facts
+            package_facts:
+
+          - block:
+            - name: Disable systemd-resolved (if present)
+              service:
+                name: systemd-resolved
+                enabled: false
+                state: stopped
+
+            - name: Delete /etc/resolv.conf
+              file:
+                path: /etc/resolv.conf
+                state: absent
+
+            - name: Restart NetworkManager
+              service:
+                name: NetworkManager
+                enabled: true
+                state: restarted
+            when: "'systemd-resolved' in ansible_facts.packages"
+
+        - hosts: dns.test
+          become: True
+          tasks:
+          - name: Install dnsmasq package
+            package:
+              name:
+              - dnsmasq
+              state: present
+
+          - name: Create dnsmasq.conf
+            copy:
+              content: |
+                # dnsmaq config
+                listen-address=::1,127.0.0.53,127.0.0.1,{{ hostvars['dns.test']['meta_ip'] }}
+                log-queries
+                log-facility=-
+                local=/test/
+                domain=test
+
+                # Disable caching so we always query AD and IPA DNS
+                cache-size=0
+
+                # These zones have their own DNS server
+                {% if 'master.ipa.test' in hostvars %}
+                server=/ipa.test/{{ hostvars['master.ipa.test']['meta_ip'] }}
+                {% endif %}
+                {% if 'dc.samba.test' in hostvars %}
+                server=/samba.test/{{ hostvars['dc.samba.test']['meta_ip'] }}
+                {% endif %}
+                {% if 'dc.ad.test' in hostvars %}
+                server=/ad.test/{{ hostvars['dc.ad.test']['meta_ip'] }}
+                {% endif %}
+
+                # Add A records for LDAP, client and other machines without own DNS server
+                {% if 'master.ldap.test' in hostvars %}
+                address=/master.ldap.test/{{ hostvars['master.ldap.test']['meta_ip'] }}
+                {% endif %}
+                {% if 'client.test' in hostvars %}
+                address=/client.test/{{ hostvars['client.test']['meta_ip'] }}
+                {% endif %}
+                {# For nfs and kdc we plan to put them alternatively on the ldap machine to save resources. #}
+                {% if 'nfs.test' in hostvars %}
+                address=/nfs.test/{{ hostvars['nfs.test']['meta_ip'] }}
+                {% elif 'master.ldap.test' in hostvars %}
+                address=/nfs.test/{{ hostvars['master.ldap.test']['meta_ip'] }}
+                {% endif %}
+                {% if 'kdc.test' in hostvars %}
+                address=/kdc.test/{{ hostvars['kdc.test']['meta_ip'] }}
+                {% elif 'master.ldap.test' in hostvars %}
+                address=/kdc.test/{{ hostvars['master.ldap.test']['meta_ip'] }}
+                {% endif %}
+
+                # Add SRV record for LDAP
+                {% if 'master.ldap.test' in hostvars %}
+                srv-host=_ldap._tcp.ldap.test,master.ldap.test,389
+                {% endif %}
+
+                # Add PTR records for all machines
+                {% if 'master.ipa.test' in hostvars %}
+                ptr-record={{ hostvars['master.ipa.test']['meta_ip'].split('.') | reverse | join(".") }}.in-addr.arpa,master.ipa.test
+                {% endif %}
+                {% if 'master.ldap.test' in hostvars %}
+                ptr-record={{ hostvars['master.ldap.test']['meta_ip'].split('.') | reverse | join(".") }}.in-addr.arpa,master.ldap.test
+                {% endif %}
+                {% if 'dc.samba.test' in hostvars %}
+                ptr-record={{ hostvars['dc.samba.test']['meta_ip'].split('.') | reverse | join(".") }}.in-addr.arpa,dc.samba.test
+                {% endif %}
+                {% if 'client.test' in hostvars %}
+                ptr-record={{ hostvars['client.test']['meta_ip'].split('.') | reverse | join(".") }}.in-addr.arpa,client.test
+                {% endif %}
+                {% if 'dc.ad.test' in hostvars %}
+                ptr-record={{ hostvars['dc.ad.test']['meta_ip'].split('.') | reverse | join(".") }}.in-addr.arpa,dc.ad.test
+                {% endif %}
+                {% if 'kdc.test' in hostvars %}
+                ptr-record={{ hostvars['kdc.test']['meta_ip'].split('.') | reverse | join(".") }}.in-addr.arpa,kdc.test
+                {% endif %}
+                {% if 'nfs.test' in hostvars %}
+                ptr-record={{ hostvars['nfs.test']['meta_ip'].split('.') | reverse | join(".") }}.in-addr.arpa,nfs.test
+                {% endif %}
+              dest: /etc/dnsmasq.conf
+              owner: root
+              group: root
+              mode: 0600
+
+          - name: Restart dnsmasq service
+            service:
+              name: dnsmasq
+              enabled: true
+              state: restarted
+
+        - hosts: services
+          become: true
+          tasks:
+          - name: Setup dns to use VM on linux hosts
+            copy:
+              dest: /etc/resolv.conf
+              content: "nameserver {{ hostvars['dns.test']['meta_ip'] }}"
+
+          - name: Set resolv.conf as immutable.
+            file:
+              path: /etc/resolv.conf
+              attr: +i
+    # Provision hosts (move to standalone playbook)
+    - playbook: "./repo/sssd-ci-containers/src/ansible/playbook_image_base.yml"
+      extra_vars:
+        user:
+          root:
+            password: Secret123
+          regular:
+            uid: 1002
+            name: ci
+            password: Secret123
+    - playbook: "./repo/sssd-ci-containers/src/ansible/playbook_image_service.yml"
+
+  - name: test
+    steps:
+    - command: |
+        config=`pwd`/pytest-mh.yaml
+        pushd ./repo/sssd/src/tests/system
+        source .venv/bin/activate
+        pytest --mh-config=$config -vvv
+
+  - name: teardown
+    steps:
+      - playbook: teardown/mrack-destroy.yaml

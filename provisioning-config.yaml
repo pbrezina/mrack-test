@@ -1,0 +1,38 @@
+---
+# for Mrack provisioner
+ssh_key_filename: 'config/id_rsa'
+provider: virt
+
+post_provisioning_check:
+    ssh:
+        # Default configurations for every host
+        enabled: True # True | False
+        disabled_providers: ["podman"] # Per provider override to `enabled: True`
+        enabled_providers: [] # Would be relevant if 'enabled' is 'False'
+        port: 22
+        timeout: 10 # minutes
+
+
+
+
+# mrack provisioning supports also static provisioning
+# this record is needed (mrack >= v0.5.2) to enable it
+static: {}
+
+virt:
+    strategy: abort
+    images:
+        fedora-37: https://kojipkgs.fedoraproject.org/compose/cloud/Fedora-Cloud-37-20230209.0/compose/Cloud/x86_64/images/Fedora-Cloud-Base-37-20230209.0.x86_64.qcow2
+    options:
+        ram: 1024
+        disksize: 10
+    groups:
+        ipa:
+          ram: 2560
+
+
+users:
+    fedora-37: fedora
+
+python:
+    fedora-37: /usr/bin/python3
