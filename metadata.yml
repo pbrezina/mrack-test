@@ -39,7 +39,7 @@ domains:
         - base_client
         - client
         role: client
-        os: fedora-37
+        os: rhel-9.3
         pytest_mh:
           artifacts:
           - /etc/sssd/*
@@ -54,7 +54,7 @@ domains:
         - base_ipa
         - ipa
         role: ipa
-        os: fedora-37
+        os: rhel-9.3
         pytest_mh:
           config:
             client:
@@ -69,7 +69,7 @@ domains:
         - base_ldap
         - ldap
         role: ldap
-        os: fedora-37
+        os: rhel-9.3
         pytest_mh:
           config:
             binddn: cn=Directory Manager
@@ -103,7 +103,7 @@ domains:
         - base_kdc
         - kdc
         role: kdc
-        os: fedora-37
+        os: rhel-9.3
         pytest_mh:
           config:
             realm: TEST
@@ -120,7 +120,7 @@ domains:
         - base_nfs
         - nfs
         role: nfs
-        os: fedora-37
+        os: rhel-9.3
         pytest_mh:
           config:
             exports_dir: /dev/shm/exports
@@ -134,9 +134,9 @@ phases:
           tasks:
           - name: Clone SSSD
             git:
-              repo: "https://github.com/pbrezina/sssd.git"
+              repo: "https://github.com/SSSD/sssd.git"
               dest: "{{ twd }}/repo/sssd"
-              version: "tls"
+              version: "master"
               single_branch: yes
               depth: 1
               force: yes
